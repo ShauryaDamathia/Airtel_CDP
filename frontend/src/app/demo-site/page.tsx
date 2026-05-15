@@ -375,15 +375,18 @@ export default function DemoSitePage() {
         message: label
       });
 
-      setLog(prev => [{
-        id: ++logCounter,
-        ts: new Date().toLocaleTimeString(),
-        event_type: String(payload.event_type),
-        customer_id: cid,
-        identifiers: identifierSummary(),
-        product,
-        status: 'ok'
-      }, ...prev].slice(0, 50));
+      setLog(prev => [
+        {
+          id: Date.now(),
+          ts: new Date().toLocaleTimeString(),
+          event_type: String(payload.event_type),
+          customer_id: cid,
+          identifiers: identifierSummary(),
+          product,
+          status: 'ok' as const,
+        },
+        ...prev,
+      ].slice(0, 50));
 
     } catch (err: any) {
       const msg = err.message || 'Request failed';
@@ -392,15 +395,18 @@ export default function DemoSitePage() {
         event_type: String(payload.event_type),
         message: msg
       });
-      setLog(prev => [{
-        id: ++logCounter,
-        ts: new Date().toLocaleTimeString(),
-        event_type: String(payload.event_type),
-        identifiers: identifierSummary(),
-        product,
-        status: 'error',
-        error: msg
-      }, ...prev].slice(0, 50));
+      setLog(prev => [
+        {
+          id: Date.now(),
+          ts: new Date().toLocaleTimeString(),
+          event_type: String(payload.event_type),
+          // customer_id: cid,
+          identifiers: identifierSummary(),
+          product,
+          status: 'ok' as const,
+        },
+        ...prev,
+      ].slice(0, 50));
     } finally {
       setLoading(null);
     }
