@@ -24,6 +24,16 @@ app.use((req, _res, next) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
+// Public: suggest the next clean user_id for the demo site login button
+app.get('/api/suggest-uid', async (_req, res) => {
+  try {
+    const result = await pg.query('SELECT COALESCE(MAX(id), 0) + 1 AS next FROM customers');
+    res.json({ user_id: `u_${result.rows[0].next}` });
+  } catch {
+    res.json({ user_id: `u_${Math.floor(Math.random() * 900) + 21}` });
+  }
+});
+
 app.use('/api/auth',      authRoutes);
 app.use('/api/events',    eventsRoutes);
 app.use('/api/customers', customersRoutes);

@@ -430,12 +430,20 @@ export default function DemoSitePage() {
     fireEvent(`buy-${product.id}`, payload, `Purchased "${product.name}" for ${product.priceLabel}`, product.name);
   }
 
-  function handleLogin() {
-    // Generate a demo user_id if not already set
-    const uid = identity.user_id || `demo_user_${Date.now()}`;
-    // Update the field so it's visible
-    setIdentity(prev => ({ ...prev, user_id: uid }));
-    setSend(prev => ({ ...prev, user_id: true }));
+  async function handleLogin() {
+    // If user_id already set, use it; otherwise fetch a clean sequential ID from the backend
+    let uid = identity.user_id;
+    if (!uid) {
+      try {
+        const res = await fetch('/api/suggest-uid');
+        const data = await res.json();
+        uid = data.user_id; // e.g. "u_21", "u_22", ...
+      } catch {
+        uid = `u_${Date.now().toString().slice(-4)}`;
+      }
+      setIdentity(prev => ({ ...prev, user_id: uid as string }));
+      setSend(prev => ({ ...prev, user_id: true }));
+    }
 
     const payload = buildPayload({ event_type: 'login', user_id: uid });
     fireEvent('login', payload, `Logged in as ${identity.first_name || identity.email || uid}`);
