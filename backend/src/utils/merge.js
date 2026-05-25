@@ -78,6 +78,14 @@ async function mergeCustomers(customerIds, triggerInfo = '') {
       [survivorId, loserIds]
     );
 
+    // ── NULL out unique-constrained fields on losers FIRST ──────────────
+    // Prevents UNIQUE violations on customers(email, phone, user_id)
+    // when the survivor UPDATE does COALESCE on those same values.
+    await client.query(
+      `UPDATE customers SET email = NULL, phone = NULL, user_id = NULL WHERE id = ANY($1)`,
+      [loserIds]
+    );
+
     // ── Update survivor aggregates ───────────────────────────────────────
 
     const aggRes = await client.query(

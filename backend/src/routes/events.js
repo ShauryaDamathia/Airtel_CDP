@@ -93,6 +93,19 @@ async function resolveIdentity(raw) {
     );
     customerId = ins.rows[0].id;
 
+    // Auto-seed default consent records for the new customer.
+    // Represents the customer accepting terms at sign-up.
+    // analytics + personalization + data_retention = true
+    // marketing_email + marketing_sms = true (opt-out model for demo)
+    // third_party_sharing = false (privacy-first default)
+    await pg.query(
+      `INSERT INTO consents (customer_id, purpose, granted)
+       SELECT $1, unnest(ARRAY['analytics','marketing_email','marketing_sms','personalization','data_retention','third_party_sharing']),
+                  unnest(ARRAY[true,       true,              true,            true,              true,             false])
+       ON CONFLICT (customer_id, purpose) DO NOTHING`,
+      [customerId]
+    ).catch(err => console.warn('consent seed failed:', err.message));
+
   } else if (matchedIds.length === 1) {
     customerId = matchedIds[0];
 

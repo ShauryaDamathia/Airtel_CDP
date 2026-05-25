@@ -431,17 +431,24 @@ export default function DemoSitePage() {
   }
 
   async function handleLogin() {
-    // If user_id already set, use it; otherwise fetch a clean sequential ID from the backend
-    let uid = identity.user_id;
+    // If user_id already filled in, use it; otherwise fetch a clean sequential ID
+    let uid = identity.user_id || '';
     if (!uid) {
       try {
         const res = await fetch('/api/suggest-uid');
-        const data = await res.json();
-        uid = data.user_id; // e.g. "u_21", "u_22", ...
-      } catch {
-        uid = `u_${Date.now().toString().slice(-4)}`;
+        if (res.ok) {
+          const data = await res.json();
+          uid = data.user_id || '';  // e.g. "u_21", "u_22", ...
+        }
+      } catch { /* ignore network errors, fall through */ }
+
+      // Final fallback: use a small random number so it's still readable
+      if (!uid) {
+        const rand = Math.floor(Math.random() * 90) + 21; // 21–110
+        uid = `u_${rand}`;
       }
-      setIdentity(prev => ({ ...prev, user_id: uid as string }));
+
+      setIdentity(prev => ({ ...prev, user_id: uid }));
       setSend(prev => ({ ...prev, user_id: true }));
     }
 
