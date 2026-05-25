@@ -1,13 +1,18 @@
+'use strict';
+
 const express = require('express');
-const pg = require('../db/postgres');
+const pg      = require('../db/postgres');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
-
 router.use(requireAuth);
 
+// Consent gate for marketing segments
+const MARKETING_CONSENTED =
+  `id IN (SELECT customer_id FROM consents WHERE purpose = 'marketing_email' AND granted = TRUE)`;
+
 /**
- * Recompute membership for one segment based on its rule_type.
+ * Recompute membership for one segment.
  */
 async function recomputeSegment(segmentId, ruleType) {
   await pg.query('DELETE FROM segment_members WHERE segment_id = $1', [segmentId]);
@@ -15,19 +20,28 @@ async function recomputeSegment(segmentId, ruleType) {
   if (ruleType === 'high_spenders') {
     await pg.query(
       `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers WHERE total_spent > 30000`,
+       SELECT $1, id FROM customers
+       WHERE total_spent > 30000
+         AND (is_merged IS NULL OR is_merged = FALSE)
+         AND ${MARKETING_CONSENTED}`,
       [segmentId]
     );
   } else if (ruleType === 'active_users') {
     await pg.query(
       `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers WHERE last_seen_at > NOW() - INTERVAL '7 days'`,
+       SELECT $1, id FROM customers
+       WHERE last_seen_at > NOW() - INTERVAL '7 days'
+         AND (is_merged IS NULL OR is_merged = FALSE)
+         AND ${MARKETING_CONSENTED}`,
       [segmentId]
     );
   } else if (ruleType === 'inactive_users') {
     await pg.query(
       `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers WHERE last_seen_at < NOW() - INTERVAL '30 days'`,
+       SELECT $1, id FROM customers
+       WHERE last_seen_at < NOW() - INTERVAL '30 days'
+         AND (is_merged IS NULL OR is_merged = FALSE)
+         AND ${MARKETING_CONSENTED}`,
       [segmentId]
     );
   }
@@ -35,7 +49,6 @@ async function recomputeSegment(segmentId, ruleType) {
 
 /**
  * GET /api/segments
- * List all segments with member counts.
  */
 router.get('/', async (req, res) => {
   try {
@@ -56,7 +69,6 @@ router.get('/', async (req, res) => {
 
 /**
  * GET /api/segments/:id
- * Segment detail + members.
  */
 router.get('/:id', async (req, res) => {
   try {
@@ -80,7 +92,7 @@ router.get('/:id', async (req, res) => {
     res.json({
       segment: segmentRes.rows[0],
       members: membersRes.rows,
-      count: membersRes.rows.length
+      count:   membersRes.rows.length
     });
   } catch (err) {
     console.error('Get segment error:', err);
@@ -89,8 +101,7 @@ router.get('/:id', async (req, res) => {
 });
 
 /**
- * POST /api/segments/:id/recompute
- * Recompute segment membership. (Admin / Marketer / Analyst)
+ * POST /api/segments/:id/recompute — Admin, Marketer, Analyst (NOT compliance)
  */
 router.post('/:id/recompute', requireRole('marketer', 'analyst'), async (req, res) => {
   try {
@@ -101,10 +112,8 @@ router.post('/:id/recompute', requireRole('marketer', 'analyst'), async (req, re
     await recomputeSegment(id, segmentRes.rows[0].rule_type);
 
     const countRes = await pg.query(
-      'SELECT COUNT(*) AS count FROM segment_members WHERE segment_id = $1',
-      [id]
+      'SELECT COUNT(*) AS count FROM segment_members WHERE segment_id = $1', [id]
     );
-
     res.json({ ok: true, member_count: parseInt(countRes.rows[0].count) });
   } catch (err) {
     console.error('Recompute segment error:', err);

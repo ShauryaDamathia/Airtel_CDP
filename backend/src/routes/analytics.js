@@ -1,29 +1,50 @@
+'use strict';
+
 const express = require('express');
-const pg = require('../db/postgres');
+const pg      = require('../db/postgres');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
-
 router.use(requireAuth);
+
+// Subquery: customers who have granted analytics consent
+const ANALYTICS_CONSENTED =
+  `(SELECT customer_id FROM consents WHERE purpose = 'analytics' AND granted = TRUE)`;
 
 /**
  * GET /api/analytics/overview
- * Top-level KPIs.
  */
 router.get('/overview', async (req, res) => {
   try {
-    const totalCustomers = await pg.query('SELECT COUNT(*) AS c FROM customers');
-    const activeUsers = await pg.query(
-      `SELECT COUNT(*) AS c FROM customers WHERE last_seen_at > NOW() - INTERVAL '7 days'`
-    );
-    const totalRevenue = await pg.query('SELECT COALESCE(SUM(total_spent), 0) AS s FROM customers');
-    const totalEvents = await pg.query('SELECT COUNT(*) AS c FROM events');
+    const [totCust, activeUsers, totalRev, totalEvents] = await Promise.all([
+      // Total non-merged customers (no consent filter for headcount)
+      pg.query(`SELECT COUNT(*) AS c FROM customers WHERE is_merged IS NULL OR is_merged = FALSE`),
+      // Active users: only analytics-consented
+      pg.query(
+        `SELECT COUNT(*) AS c FROM customers
+         WHERE last_seen_at > NOW() - INTERVAL '7 days'
+           AND (is_merged IS NULL OR is_merged = FALSE)
+           AND id IN ${ANALYTICS_CONSENTED}`
+      ),
+      // Revenue: analytics-consented customers only
+      pg.query(
+        `SELECT COALESCE(SUM(total_spent), 0) AS s FROM customers
+         WHERE (is_merged IS NULL OR is_merged = FALSE)
+           AND id IN ${ANALYTICS_CONSENTED}`
+      ),
+      // Events: analytics-consented only
+      pg.query(
+        `SELECT COUNT(*) AS c FROM events
+         WHERE consent_verified = TRUE
+            OR consent_verified IS NULL`
+      )
+    ]);
 
     res.json({
-      total_customers: parseInt(totalCustomers.rows[0].c),
+      total_customers: parseInt(totCust.rows[0].c),
       active_users:    parseInt(activeUsers.rows[0].c),
-      total_events:    parseInt(totalEvents.rows[0].c),
-      total_revenue:   parseFloat(totalRevenue.rows[0].s)
+      total_revenue:   parseFloat(totalRev.rows[0].s),
+      total_events:    parseInt(totalEvents.rows[0].c)
     });
   } catch (err) {
     console.error('Overview error:', err);
@@ -32,8 +53,7 @@ router.get('/overview', async (req, res) => {
 });
 
 /**
- * GET /api/analytics/dau
- * Daily Active Users for the last 14 days.
+ * GET /api/analytics/dau — Daily Active Users (last 14 days, analytics-consented only)
  */
 router.get('/dau', async (req, res) => {
   try {
@@ -42,14 +62,14 @@ router.get('/dau', async (req, res) => {
              COUNT(DISTINCT customer_id) AS dau
       FROM events
       WHERE timestamp > NOW() - INTERVAL '14 days'
+        AND customer_id IN ${ANALYTICS_CONSENTED}
       GROUP BY day
       ORDER BY day
     `);
 
-    // Fill missing days with 0
     const data = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86400000);
+      const d   = new Date(Date.now() - i * 86400000);
       const day = d.toISOString().slice(0, 10);
       const found = result.rows.find(r => r.day === day);
       data.push({ day, dau: found ? parseInt(found.dau) : 0 });
@@ -62,23 +82,22 @@ router.get('/dau', async (req, res) => {
 });
 
 /**
- * GET /api/analytics/events-trend
- * Daily event counts for the last 14 days.
+ * GET /api/analytics/events-trend — Daily event counts (last 14 days)
  */
 router.get('/events-trend', async (req, res) => {
   try {
     const result = await pg.query(`
-      SELECT TO_CHAR(timestamp, 'YYYY-MM-DD') AS day,
-             COUNT(*) AS count
+      SELECT TO_CHAR(timestamp, 'YYYY-MM-DD') AS day, COUNT(*) AS count
       FROM events
       WHERE timestamp > NOW() - INTERVAL '14 days'
+        AND customer_id IN ${ANALYTICS_CONSENTED}
       GROUP BY day
       ORDER BY day
     `);
 
     const data = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86400000);
+      const d   = new Date(Date.now() - i * 86400000);
       const day = d.toISOString().slice(0, 10);
       const found = result.rows.find(r => r.day === day);
       data.push({ day, count: found ? parseInt(found.count) : 0 });
@@ -91,22 +110,22 @@ router.get('/events-trend', async (req, res) => {
 });
 
 /**
- * GET /api/analytics/revenue-trend
- * Revenue by day for the last 14 days from purchases.
+ * GET /api/analytics/revenue-trend — Revenue per day (last 14 days)
  */
 router.get('/revenue-trend', async (req, res) => {
   try {
     const result = await pg.query(`
-      SELECT TO_CHAR(created_at, 'YYYY-MM-DD') AS day, SUM(amount) AS revenue
-      FROM purchases
-      WHERE created_at > NOW() - INTERVAL '14 days'
+      SELECT TO_CHAR(p.created_at, 'YYYY-MM-DD') AS day, SUM(p.amount) AS revenue
+      FROM purchases p
+      WHERE p.created_at > NOW() - INTERVAL '14 days'
+        AND p.customer_id IN ${ANALYTICS_CONSENTED}
       GROUP BY day
       ORDER BY day
     `);
 
     const data = [];
     for (let i = 13; i >= 0; i--) {
-      const d = new Date(Date.now() - i * 86400000);
+      const d   = new Date(Date.now() - i * 86400000);
       const day = d.toISOString().slice(0, 10);
       const found = result.rows.find(r => r.day === day);
       data.push({ day, revenue: found ? parseFloat(found.revenue) : 0 });
@@ -119,15 +138,17 @@ router.get('/revenue-trend', async (req, res) => {
 });
 
 /**
- * GET /api/analytics/funnel
- * Conversion funnel: page_view → login → purchase.
- * Counts unique customers reaching each step.
+ * GET /api/analytics/funnel — Conversion funnel (analytics-consented only)
  */
 router.get('/funnel', async (req, res) => {
   try {
     const result = await pg.query(`
-      WITH page_viewers AS (
-        SELECT DISTINCT customer_id FROM events WHERE event_type = 'page_view'
+      WITH consented AS (
+        SELECT customer_id FROM consents WHERE purpose = 'analytics' AND granted = TRUE
+      ),
+      page_viewers AS (
+        SELECT DISTINCT customer_id FROM events
+        WHERE event_type = 'page_view' AND customer_id IN (SELECT customer_id FROM consented)
       ),
       logged_in AS (
         SELECT DISTINCT customer_id FROM events
@@ -150,7 +171,7 @@ router.get('/funnel', async (req, res) => {
     res.json({
       steps: [
         { name: 'Page View', count: parseInt(r.page_views), conversion: 100 },
-        { name: 'Login',     count: parseInt(r.logins),     conversion: Math.round((parseInt(r.logins) / total) * 100) },
+        { name: 'Login',     count: parseInt(r.logins),     conversion: Math.round((parseInt(r.logins)    / total) * 100) },
         { name: 'Purchase',  count: parseInt(r.purchases),  conversion: Math.round((parseInt(r.purchases) / total) * 100) }
       ]
     });

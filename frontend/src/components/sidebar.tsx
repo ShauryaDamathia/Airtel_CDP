@@ -4,22 +4,38 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  LayoutDashboard, Users, Layers, BarChart3, ShieldCheck,
-  LogOut, Database
+  LayoutDashboard, Users, Layers, BarChart3,
+  ShieldCheck, LogOut, Database, GitMerge
 } from 'lucide-react';
 import { getUser, setToken, setUser } from '@/lib/api';
 
-const NAV = [
+// Nav items that are always visible to all roles
+const NAV_ALWAYS = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/profiles',  label: 'Profiles',  icon: Users },
   { href: '/segments',  label: 'Segments',  icon: Layers },
-  { href: '/analytics', label: 'Analytics', icon: BarChart3 },
-  { href: '/consent',   label: 'Consent',   icon: ShieldCheck }
+  { href: '/analytics', label: 'Analytics', icon: BarChart3 }
+];
+
+// Nav items visible only to specific roles
+const NAV_RESTRICTED = [
+  {
+    href:   '/consent',
+    label:  'Consent',
+    icon:   ShieldCheck,
+    roles:  ['admin', 'analyst', 'compliance']   // hidden from marketer
+  },
+  {
+    href:   '/matches',
+    label:  'ID Matches',
+    icon:   GitMerge,
+    roles:  ['admin', 'compliance']              // fuzzy match review
+  }
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
+  const router   = useRouter();
   const [user, setUserState] = useState<any>(null);
 
   useEffect(() => { setUserState(getUser()); }, []);
@@ -29,6 +45,13 @@ export function Sidebar() {
     setUser(null);
     router.push('/login');
   }
+
+  const role = user?.role || '';
+
+  const visibleNav = [
+    ...NAV_ALWAYS,
+    ...NAV_RESTRICTED.filter(item => item.roles.includes(role))
+  ];
 
   return (
     <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
@@ -47,7 +70,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 py-4 space-y-1">
-        {NAV.map(item => {
+        {visibleNav.map(item => {
           const active = pathname === item.href || pathname.startsWith(item.href + '/');
           const Icon = item.icon;
           return (
@@ -67,13 +90,16 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* User */}
+      {/* User panel */}
       <div className="p-3 border-t border-gray-200">
         <div className="px-2 py-2 mb-1">
           <div className="text-sm font-medium text-gray-900 truncate">{user?.full_name || 'User'}</div>
           <div className="text-xs text-gray-500 truncate">{user?.email}</div>
-          <div className="mt-1.5">
+          <div className="flex items-center gap-2 mt-1.5">
             <span className="badge bg-brand-50 text-brand-700 capitalize">{user?.role}</span>
+            {user?.role === 'marketer' && (
+              <span className="badge bg-amber-50 text-amber-700 text-[10px]">PII masked</span>
+            )}
           </div>
         </div>
         <button

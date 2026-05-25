@@ -1,127 +1,185 @@
+'use strict';
+
 const express = require('express');
-const pg = require('../db/postgres');
-const { requireAuth } = require('../middleware/auth');
+const pg      = require('../db/postgres');
+const { requireAuth }                        = require('../middleware/auth');
+const { normalizeIdentifiers }               = require('../utils/normalize');
+const { mergeCustomers, registerIdentifiers } = require('../utils/merge');
+const { hasConsent }                          = require('../utils/consent');
 
 const router = express.Router();
 
-/**
- * IDENTITY RESOLUTION
- * --------------------------------------------------------------------
- * Match an incoming event to an existing customer using:
- *   1. user_id  (strongest)
- *   2. email
- *   3. phone
- * If no match found, create a new customer.
- * Returns: customer_id (PostgreSQL primary key)
- */
-async function resolveIdentity({ user_id, email, phone, first_name, last_name }) {
-  let result;
+const FUZZY_THRESHOLD = parseFloat(process.env.FUZZY_MATCH_THRESHOLD) || 0.82;
 
-  if (user_id) {
-    result = await pg.query('SELECT id FROM customers WHERE user_id = $1', [user_id]);
-    if (result.rows.length) return result.rows[0].id;
-  }
-  if (email) {
-    result = await pg.query('SELECT id FROM customers WHERE email = $1', [email.toLowerCase()]);
-    if (result.rows.length) {
-      // Backfill user_id / phone if missing
-      const id = result.rows[0].id;
-      await pg.query(
-        `UPDATE customers SET
-          user_id = COALESCE(user_id, $2),
-          phone   = COALESCE(phone,   $3)
-         WHERE id = $1`,
-        [id, user_id || null, phone || null]
-      );
-      return id;
-    }
-  }
-  if (phone) {
-    result = await pg.query('SELECT id FROM customers WHERE phone = $1', [phone]);
-    if (result.rows.length) {
-      const id = result.rows[0].id;
-      await pg.query(
-        `UPDATE customers SET
-          user_id = COALESCE(user_id, $2),
-          email   = COALESCE(email,   $3)
-         WHERE id = $1`,
-        [id, user_id || null, email ? email.toLowerCase() : null]
-      );
-      return id;
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveIdentity
+//
+// 1. Normalize all incoming identifiers
+// 2. Look up customer_identifiers for ANY match
+// 3. Handle result:
+//    0 matches → create new customer + register identifiers
+//    1 match   → use existing, register any new identifiers
+//    2+ matches → merge all matched customers, use survivor
+// 4. Fuzzy email fallback if exact lookup returns 0 matches
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function resolveIdentity(raw) {
+  const { user_id, email, phone, first_name, last_name } = normalizeIdentifiers(raw);
+
+  // Build lookup conditions (only non-null identifiers)
+  const conditions = [];
+  const values     = [];
+  let   idx        = 1;
+  if (user_id) { conditions.push(`(type = 'user_id' AND value = $${idx++})`); values.push(user_id); }
+  if (email)   { conditions.push(`(type = 'email'   AND value = $${idx++})`); values.push(email);   }
+  if (phone)   { conditions.push(`(type = 'phone'   AND value = $${idx++})`); values.push(phone);   }
+
+  if (!conditions.length) {
+    throw new Error('At least one of user_id, email, phone is required');
   }
 
-  // No match — create new customer
-  const insertRes = await pg.query(
-    `INSERT INTO customers (user_id, email, phone, first_name, last_name, lifecycle_stage, last_seen_at)
-     VALUES ($1, $2, $3, $4, $5, 'new', NOW())
-     RETURNING id`,
-    [
-      user_id || null,
-      email ? email.toLowerCase() : null,
-      phone || null,
-      first_name || null,
-      last_name || null
-    ]
+  // ── Exact lookup via customer_identifiers ────────────────────────────────
+
+  const exactRes = await pg.query(
+    `SELECT DISTINCT customer_id FROM customer_identifiers
+     WHERE ${conditions.join(' OR ')}`,
+    values
   );
-  return insertRes.rows[0].id;
+
+  let matchedIds = exactRes.rows.map(r => r.customer_id);
+
+  // ── Fuzzy email fallback ──────────────────────────────────────────────────
+
+  if (matchedIds.length === 0 && email) {
+    const fuzzyRes = await pg.query(
+      `SELECT ci.customer_id, similarity(ci.value, $1) AS score
+       FROM customer_identifiers ci
+       WHERE ci.type = 'email'
+         AND similarity(ci.value, $1) > $2
+       ORDER BY score DESC
+       LIMIT 1`,
+      [email, FUZZY_THRESHOLD]
+    );
+
+    if (fuzzyRes.rows.length) {
+      const fuzzyCustomerId = fuzzyRes.rows[0].customer_id;
+      const fuzzyScore      = fuzzyRes.rows[0].score;
+
+      // Log for human review (don't block the event)
+      await pg.query(
+        `INSERT INTO pending_matches
+           (incoming_identifier, identifier_type, matched_customer_id, similarity_score, status)
+         VALUES ($1, 'email', $2, $3, 'pending')`,
+        [email, fuzzyCustomerId, fuzzyScore]
+      ).catch(err => console.warn('pending_match insert failed:', err.message));
+
+      console.log(`[fuzzy] ${email} → customer #${fuzzyCustomerId} (score ${fuzzyScore})`);
+      matchedIds = [fuzzyCustomerId];
+    }
+  }
+
+  // ── Result handling ───────────────────────────────────────────────────────
+
+  let customerId;
+
+  if (matchedIds.length === 0) {
+    // Create new customer
+    const ins = await pg.query(
+      `INSERT INTO customers
+         (user_id, email, phone, first_name, last_name, lifecycle_stage, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, 'new', NOW())
+       RETURNING id`,
+      [user_id || null, email || null, phone || null, first_name || null, last_name || null]
+    );
+    customerId = ins.rows[0].id;
+
+  } else if (matchedIds.length === 1) {
+    customerId = matchedIds[0];
+
+    // Backfill missing identifiers on the customer row
+    await pg.query(
+      `UPDATE customers SET
+         user_id    = COALESCE(user_id,    $2),
+         email      = COALESCE(email,      $3),
+         phone      = COALESCE(phone,      $4),
+         first_name = COALESCE(first_name, $5),
+         last_name  = COALESCE(last_name,  $6)
+       WHERE id = $1`,
+      [customerId, user_id || null, email || null, phone || null,
+       first_name || null, last_name || null]
+    );
+
+  } else {
+    // 2+ matches — merge into oldest customer
+    const trigger = [
+      user_id ? `user_id:${user_id}` : null,
+      email   ? `email:${email}`     : null,
+      phone   ? `phone:${phone}`     : null
+    ].filter(Boolean).join(', ');
+
+    customerId = await mergeCustomers(matchedIds, trigger);
+  }
+
+  // Register all identifiers from this event
+  await registerIdentifiers(customerId, { user_id, email, phone });
+
+  return customerId;
 }
 
-/**
- * POST /api/events
- * Ingest a single event. Public endpoint (would be SDK-side in production).
- *
- * Body: {
- *   event_type: 'page_view' | 'login' | 'purchase',
- *   user_id?: string, email?: string, phone?: string,
- *   first_name?: string, last_name?: string,
- *   properties?: object
- * }
- *
- * For purchase events, properties.amount creates a transaction.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/events
+// Public endpoint — website SDK would call this in production.
+// ─────────────────────────────────────────────────────────────────────────────
+
 router.post('/', async (req, res) => {
   try {
-    const { event_type, user_id, email, phone, first_name, last_name, properties = {} } = req.body;
-    if (!event_type) return res.status(400).json({ error: 'event_type required' });
+    const {
+      event_type, user_id, email, phone,
+      first_name, last_name, properties = {}
+    } = req.body;
+
+    if (!event_type) {
+      return res.status(400).json({ error: 'event_type required' });
+    }
     if (!user_id && !email && !phone) {
       return res.status(400).json({ error: 'At least one of user_id, email, phone required' });
     }
 
-    // 1. Resolve identity (find or create customer)
+    // 1. Resolve identity
     const customerId = await resolveIdentity({ user_id, email, phone, first_name, last_name });
 
-    // 2. Store event in PostgreSQL
+    // 2. Consent check — tag event if analytics consent denied
+    const consentVerified = await hasConsent(customerId, 'analytics');
+
+    // 3. Store event
     await pg.query(
-      `INSERT INTO events (customer_id, event_type, user_id, email, phone, properties, timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      `INSERT INTO events
+         (customer_id, event_type, user_id, email, phone, properties, timestamp, consent_verified)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)`,
       [
-        customerId,
-        event_type,
+        customerId, event_type,
         user_id || null,
-        email ? email.toLowerCase() : null,
-        phone || null,
-        properties
+        email   ? email.trim().toLowerCase() : null,
+        phone   || null,
+        properties,
+        consentVerified
       ]
     );
 
-    // 3. Update customer aggregates
+    // 4. Update customer aggregates
     await pg.query(
-      `UPDATE customers SET
-         total_events = total_events + 1,
-         last_seen_at = NOW()
-       WHERE id = $1`,
+      `UPDATE customers SET total_events = total_events + 1, last_seen_at = NOW() WHERE id = $1`,
       [customerId]
     );
 
-    // 4. If it's a purchase, store the transaction and update total_spent
+    // 5. If purchase, store transaction
     if (event_type === 'purchase' && properties.amount) {
       await pg.query(
         `INSERT INTO purchases (customer_id, amount, product_name) VALUES ($1, $2, $3)`,
         [customerId, properties.amount, properties.product_name || 'Unnamed product']
       );
       await pg.query(
-        `UPDATE customers SET total_spent = total_spent + $1 WHERE id = $2`,
+        'UPDATE customers SET total_spent = total_spent + $1 WHERE id = $2',
         [properties.amount, customerId]
       );
     }
@@ -133,15 +191,15 @@ router.post('/', async (req, res) => {
   }
 });
 
-/**
- * GET /api/events
- * List recent events (admin/analyst view).
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/events  — recent events list (authenticated)
+// ─────────────────────────────────────────────────────────────────────────────
+
 router.get('/', requireAuth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
     const result = await pg.query(
-      `SELECT id, customer_id, event_type, user_id, email, properties, timestamp
+      `SELECT id, customer_id, event_type, user_id, email, properties, timestamp, consent_verified
        FROM events
        ORDER BY timestamp DESC
        LIMIT $1`,

@@ -52,29 +52,64 @@ async function request(path: string, opts: RequestInit = {}) {
 }
 
 export const api = {
-  // Auth
+  // ── Auth ──────────────────────────────────────────────────────────────────
   login: (email: string, password: string) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
 
-  // Customers
+  // ── Customers ─────────────────────────────────────────────────────────────
   listCustomers: (q?: string) =>
     request('/customers' + (q ? `?q=${encodeURIComponent(q)}` : '')),
   getCustomer: (id: number) => request(`/customers/${id}`),
 
-  // Segments
+  // ── Segments ──────────────────────────────────────────────────────────────
   listSegments: () => request('/segments'),
-  getSegment: (id: number) => request(`/segments/${id}`),
-  recomputeSegment: (id: number) => request(`/segments/${id}/recompute`, { method: 'POST' }),
+  getSegment:   (id: number) => request(`/segments/${id}`),
+  recomputeSegment: (id: number) =>
+    request(`/segments/${id}/recompute`, { method: 'POST' }),
 
-  // Analytics
-  overview: () => request('/analytics/overview'),
-  dau: () => request('/analytics/dau'),
-  eventsTrend: () => request('/analytics/events-trend'),
-  revenueTrend: () => request('/analytics/revenue-trend'),
-  funnel: () => request('/analytics/funnel'),
+  // ── Analytics ─────────────────────────────────────────────────────────────
+  overview:      () => request('/analytics/overview'),
+  dau:           () => request('/analytics/dau'),
+  eventsTrend:   () => request('/analytics/events-trend'),
+  revenueTrend:  () => request('/analytics/revenue-trend'),
+  funnel:        () => request('/analytics/funnel'),
 
-  // Consents
+  // ── Consents — current records ────────────────────────────────────────────
   listConsents: () => request('/consents'),
-  updateConsent: (customer_id: number, purpose: string, granted: boolean) =>
-    request('/consents', { method: 'POST', body: JSON.stringify({ customer_id, purpose, granted }) })
+  updateConsent: (
+    customer_id: number,
+    purpose: string,
+    granted: boolean,
+    meta?: { source?: string; channel?: string; notes?: string; policy_version?: string }
+  ) =>
+    request('/consents', {
+      method: 'POST',
+      body: JSON.stringify({ customer_id, purpose, granted, ...meta })
+    }),
+
+  // ── Consents — history ────────────────────────────────────────────────────
+  /** Full audit log (admin/compliance only) */
+  listConsentHistory: (params?: { purpose?: string; since?: string; limit?: number; offset?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.purpose) q.set('purpose', params.purpose);
+    if (params?.since)   q.set('since',   params.since);
+    if (params?.limit)   q.set('limit',   String(params.limit));
+    if (params?.offset)  q.set('offset',  String(params.offset));
+    const qs = q.toString();
+    return request(`/consents/history${qs ? '?' + qs : ''}`);
+  },
+
+  /** History for a single customer */
+  getCustomerConsentHistory: (customerId: number) =>
+    request(`/consents/customer/${customerId}/history`),
+
+  /** Aggregated consent analytics */
+  consentAnalytics: () => request('/consents/analytics'),
+
+  // ── Fuzzy match review ────────────────────────────────────────────────────
+  listPendingMatches: () => request('/matches/pending'),
+  confirmMatch: (id: number) =>
+    request(`/matches/${id}/confirm`, { method: 'POST' }),
+  rejectMatch: (id: number) =>
+    request(`/matches/${id}/reject`, { method: 'POST' })
 };
