@@ -24,13 +24,21 @@ app.use((req, _res, next) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-// Public: suggest the next clean user_id for the demo site login button
+// Public: suggest the next clean user_id for the demo site login button.
+// Takes the MAX across both customers.id AND already-registered u_X identifiers
+// so we never hand out a user_id that is already linked to an existing profile.
 app.get('/api/suggest-uid', async (_req, res) => {
   try {
-    const result = await pg.query('SELECT COALESCE(MAX(id), 0) + 1 AS next FROM customers');
-    res.json({ user_id: `u_${result.rows[0].next}` });
+    const r1 = await pg.query('SELECT COALESCE(MAX(id), 0) AS m FROM customers');
+    const r2 = await pg.query(
+      `SELECT COALESCE(MAX(CAST(SUBSTRING(value FROM 3) AS BIGINT)), 0) AS m
+       FROM customer_identifiers
+       WHERE type = 'user_id' AND value ~ '^u_[0-9]+$'`
+    );
+    const next = Math.max(parseInt(r1.rows[0].m), parseInt(r2.rows[0].m)) + 1;
+    res.json({ user_id: `u_${next}` });
   } catch {
-    res.json({ user_id: `u_${Math.floor(Math.random() * 900) + 21}` });
+    res.json({ user_id: `u_${Date.now() % 90000 + 10000}` });
   }
 });
 
