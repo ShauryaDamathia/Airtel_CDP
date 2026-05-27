@@ -6,6 +6,8 @@ const { requireAuth }                        = require('../middleware/auth');
 const { normalizeIdentifiers }               = require('../utils/normalize');
 const { mergeCustomers, registerIdentifiers } = require('../utils/merge');
 const { hasConsent }                          = require('../utils/consent');
+const { updateLifecycleStage }                = require('../utils/lifecycle');
+const { recomputeAllSegments }                = require('../utils/segments');
 
 const router = express.Router();
 
@@ -197,7 +199,14 @@ router.post('/', async (req, res) => {
       );
     }
 
+    // 6. Respond immediately — don't make the caller wait for analytics work
     res.status(202).json({ ok: true, customer_id: customerId });
+
+    // 7. Post-response async: recalculate lifecycle stage + refresh all segments.
+    //    Fire-and-forget — errors are logged inside each utility, never thrown.
+    updateLifecycleStage(customerId);
+    recomputeAllSegments();
+
   } catch (err) {
     console.error('Event ingestion error:', err);
     res.status(500).json({ error: 'Internal server error' });

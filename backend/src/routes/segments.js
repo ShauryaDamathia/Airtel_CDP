@@ -2,50 +2,11 @@
 
 const express = require('express');
 const pg      = require('../db/postgres');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole }  = require('../middleware/auth');
+const { recomputeSegment }          = require('../utils/segments');
 
 const router = express.Router();
 router.use(requireAuth);
-
-// Consent gate for marketing segments
-const MARKETING_CONSENTED =
-  `id IN (SELECT customer_id FROM consents WHERE purpose = 'marketing_email' AND granted = TRUE)`;
-
-/**
- * Recompute membership for one segment.
- */
-async function recomputeSegment(segmentId, ruleType) {
-  await pg.query('DELETE FROM segment_members WHERE segment_id = $1', [segmentId]);
-
-  if (ruleType === 'high_spenders') {
-    await pg.query(
-      `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers
-       WHERE total_spent > 30000
-         AND (is_merged IS NULL OR is_merged = FALSE)
-         AND ${MARKETING_CONSENTED}`,
-      [segmentId]
-    );
-  } else if (ruleType === 'active_users') {
-    await pg.query(
-      `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers
-       WHERE last_seen_at > NOW() - INTERVAL '7 days'
-         AND (is_merged IS NULL OR is_merged = FALSE)
-         AND ${MARKETING_CONSENTED}`,
-      [segmentId]
-    );
-  } else if (ruleType === 'inactive_users') {
-    await pg.query(
-      `INSERT INTO segment_members (segment_id, customer_id)
-       SELECT $1, id FROM customers
-       WHERE last_seen_at < NOW() - INTERVAL '30 days'
-         AND (is_merged IS NULL OR is_merged = FALSE)
-         AND ${MARKETING_CONSENTED}`,
-      [segmentId]
-    );
-  }
-}
 
 /**
  * GET /api/segments

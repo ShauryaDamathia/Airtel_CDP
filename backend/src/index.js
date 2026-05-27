@@ -3,6 +3,8 @@ const express = require('express');
 const cors    = require('cors');
 
 const pg = require('./db/postgres');
+const { updateAllLifecycleStages } = require('./utils/lifecycle');
+const { recomputeAllSegments }     = require('./utils/segments');
 
 const authRoutes      = require('./routes/auth');
 const eventsRoutes    = require('./routes/events');
@@ -66,6 +68,11 @@ const PORT = process.env.PORT || 4000;
     app.listen(PORT, () => {
       console.log(`[ok] CDP Backend running on http://localhost:${PORT}`);
     });
+
+    // On startup: fix any stale lifecycle stages + refresh segment membership
+    await updateAllLifecycleStages();
+    await recomputeAllSegments();
+    console.log('[ok] Lifecycle stages and segments refreshed');
   } catch (err) {
     console.error('Failed to start:', err);
     process.exit(1);
