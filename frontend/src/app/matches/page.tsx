@@ -90,17 +90,6 @@ function MatchesContent() {
         </p>
       </div>
 
-      {/* Info banner */}
-      <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
-        <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
-        <p className="text-xs text-blue-800 leading-relaxed">
-          <span className="font-semibold">How fuzzy matching works:</span> When an incoming email doesn't exactly match
-          any known customer but is {'>'}82% similar (e.g. <code className="bg-blue-100 px-0.5 rounded">gmial.com</code> vs{' '}
-          <code className="bg-blue-100 px-0.5 rounded">gmail.com</code>), the CDP assigns the event to the matched customer
-          and queues it here for review. Events are never lost — this queue is for auditing only.
-        </p>
-      </div>
-
       {/* Stats + filter bar */}
       <div className="flex gap-2 flex-wrap">
         {(['all', 'pending', 'confirmed', 'rejected'] as FilterStatus[]).map(f => (
