@@ -22,7 +22,7 @@ const DISPLAY_PURPOSES = [
   { key: 'analytics',          label: 'Analytics',           color: 'blue'   },
   { key: 'marketing_email',    label: 'Mktg Email',          color: 'purple' },
   { key: 'marketing_sms',      label: 'Mktg SMS',            color: 'pink'   },
-  { key: 'personalization',    label: 'Personaliz.',         color: 'indigo' },
+  { key: 'personalization',    label: 'Personalize',         color: 'indigo' },
   { key: 'third_party_sharing',label: 'Third Party',         color: 'orange' },
   { key: 'data_retention',     label: 'Data Retention',      color: 'teal'   }
 ];
